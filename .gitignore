@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+.Python
+
+# Data / model artifacts
+*.pt
+*.pth
+*.npy
+*.npz
+*.csv
+*.tsv
+*.db
+*.sqlite
+*.zip
+*.tar
+*.tar.gz
+result/
+results/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
