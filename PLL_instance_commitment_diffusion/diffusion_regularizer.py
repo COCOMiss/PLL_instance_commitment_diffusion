@@ -64,6 +64,9 @@ class InstanceConditionedDiffusionSharpening(nn.Module):
         reverse_kl_weight: float = 0.20,
         input_noise_min: float = 0.05,
         input_noise_max: float = 0.45,
+        quality_gate_mode: str = "relaxed",
+        gate_entropy_threshold: float = 0.10,
+        gate_margin_threshold: float = 0.80,
     ) -> None:
         super().__init__()
         self.max_candidates = int(max_candidates)
@@ -88,6 +91,14 @@ class InstanceConditionedDiffusionSharpening(nn.Module):
         self.reverse_kl_weight = float(reverse_kl_weight)
         self.input_noise_min = float(input_noise_min)
         self.input_noise_max = float(input_noise_max)
+        self.quality_gate_mode = str(quality_gate_mode).strip().lower()
+        if self.quality_gate_mode not in {"strict", "relaxed", "none"}:
+            raise ValueError(
+                "quality_gate_mode must be one of {'strict', 'relaxed', 'none'}, "
+                f"got {quality_gate_mode!r}"
+            )
+        self.gate_entropy_threshold = float(gate_entropy_threshold)
+        self.gate_margin_threshold = float(gate_margin_threshold)
 
 
         self.dist_proj = nn.Sequential(
@@ -421,10 +432,33 @@ class InstanceConditionedDiffusionSharpening(nn.Module):
             margin_gain = ((margin_diff - margin_ic) / (1.0 - margin_ic).clamp_min(1e-6)).clamp(-1.0, 1.0)
             sharper = entropy_diff.le(entropy_ic)
             margin_better = margin_diff.ge(margin_ic)
-            # No fixed threshold here: quality gate only requires q_diff to be
-            # no worse than q_IC in sharpness and margin.  The actual weight is
-            # still exactly the commitment weight.
-            relative_quality_mask = sharper & margin_better
+
+            # Quality gate for using q_diff as the generated soft-CE teacher.
+            # strict  : q_diff must be no worse than q_IC in entropy and margin.
+            # relaxed : once q_IC is already very sharp/high-margin, q_diff only
+            #           needs to satisfy absolute reliability thresholds.
+            # none    : use every eligible q_diff with the commitment weight.
+            valid_k_for_gate = cand_mask.float().sum(dim=-1).clamp_min(2.0)
+            log_k_for_gate = valid_k_for_gate.log().clamp_min(1e-6)
+            entropy_ic_norm = (entropy_ic / log_k_for_gate).clamp(0.0, 1.0)
+            entropy_diff_norm = (entropy_diff / log_k_for_gate).clamp(0.0, 1.0)
+
+            if self.quality_gate_mode == "none":
+                entropy_gate = torch.ones_like(eligible, dtype=torch.bool)
+                margin_gate = torch.ones_like(eligible, dtype=torch.bool)
+                relative_quality_mask = eligible
+            elif self.quality_gate_mode == "relaxed":
+                entropy_threshold = torch.full_like(entropy_ic_norm, self.gate_entropy_threshold)
+                margin_threshold = torch.full_like(margin_ic, self.gate_margin_threshold)
+                entropy_gate = entropy_diff_norm.le(torch.maximum(entropy_ic_norm, entropy_threshold))
+                margin_gate = margin_diff.ge(torch.minimum(margin_ic, margin_threshold))
+                relative_quality_mask = entropy_gate & margin_gate
+            else:  # strict
+                entropy_gate = sharper
+                margin_gate = margin_better
+                relative_quality_mask = sharper & margin_better
+
+            relative_quality_mask = relative_quality_mask & eligible
             dce_mask = eligible_float
             diff_commitment_base_weight = (base_reliability * dce_mask).detach()
             diff_commitment_weight = (base_reliability * dce_mask * relative_quality_mask.float()).detach()
@@ -436,6 +470,8 @@ class InstanceConditionedDiffusionSharpening(nn.Module):
             agree_rate = (soft_agree * eligible_float).sum() / eligible_denom
             sharper_rate = (sharper.float() * eligible_float).sum() / eligible_denom
             margin_better_rate = (margin_better.float() * eligible_float).sum() / eligible_denom
+            entropy_gate_rate = (entropy_gate.float() * eligible_float).sum() / eligible_denom
+            margin_gate_rate = (margin_gate.float() * eligible_float).sum() / eligible_denom
             use_diff_rate = diff_commitment_weight.gt(0).float().sum() / valid_denom
             avg_eta = diff_commitment_weight.sum() / valid_denom
             avg_diff_commitment_quality = ((0.5 * sharper.float() + 0.5 * margin_better.float()) * eligible_float).sum() / eligible_denom
@@ -476,6 +512,8 @@ class InstanceConditionedDiffusionSharpening(nn.Module):
             "top_agree_rate": (top_agree.float() * eligible_float).sum().div(eligible_denom).detach(),
             "sharper_rate": sharper_rate.detach(),
             "margin_better_rate": margin_better_rate.detach(),
+            "entropy_gate_rate": entropy_gate_rate.detach(),
+            "margin_gate_rate": margin_gate_rate.detach(),
             "use_diff_rate": use_diff_rate.detach(),
             "avg_eta": avg_eta.detach(),
             "mask_rate": mask_rate.detach(),

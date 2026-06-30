@@ -272,6 +272,9 @@ def build_diffusion_regularizer(args, conf):
         reverse_kl_weight=float(args.diffusion_reverse_kl_weight),
         input_noise_min=float(args.diffusion_input_noise_min),
         input_noise_max=float(args.diffusion_input_noise_max),
+        quality_gate_mode=str(args.diffusion_quality_gate_mode),
+        gate_entropy_threshold=float(args.diffusion_gate_entropy_threshold),
+        gate_margin_threshold=float(args.diffusion_gate_margin_threshold),
     ).to(conf.device)
 
 
@@ -442,7 +445,7 @@ def save_checkpoint_components(path, model, diffusion=None, phase=None, score=No
 def run_training(model, train_loader, val_loader, test_loader, conf, args, checkpoint_path):
     total_epochs = max(int(args.epochs), 1)
     phase = str(getattr(args, "training_phase", "phase1_base"))
-    if phase not in {"phase1_base", "phase2_diffusion", "phase3_dce", "phase3_joint_dce"}:
+    if phase not in {"phase1_base", "phase2_diffusion", "phase3_dce", "phase3_joint_dce", "phase3_ic_dce"}:
         raise ValueError(f"Unknown training_phase={phase}")
 
     diffusion_regularizer = build_diffusion_regularizer(args, conf)
@@ -475,6 +478,12 @@ def run_training(model, train_loader, val_loader, test_loader, conf, args, check
     elif phase == "phase3_dce":
         if diffusion_regularizer is None:
             raise ValueError("phase3_dce requires a trained diffusion module. Use --diffusion_checkpoint if available.")
+        set_requires_grad(model, True)
+        set_requires_grad(diffusion_regularizer, False)
+        trainable_params = list(model.parameters())
+    elif phase == "phase3_ic_dce":
+        # Ablation: instance commitment only. Train the main model with
+        # CE(q_IC, p) and the same commitment weight alpha*ce_weight.
         set_requires_grad(model, True)
         set_requires_grad(diffusion_regularizer, False)
         trainable_params = list(model.parameters())
@@ -515,12 +524,13 @@ def run_training(model, train_loader, val_loader, test_loader, conf, args, check
             f"target_soft_mix={args.diffusion_target_soft_mix:.2f}, refine_steps={args.diffusion_refine_steps}, "
             f"mask_prob={args.diffusion_mask_prob:.2f}, ctx_loss_w={args.diffusion_context_loss_weight:.2f}, "
             f"DCE_lambda={args.diffusion_dce_lambda:.3f}, "
+            f"quality_gate={args.diffusion_quality_gate_mode}, gate_H={args.diffusion_gate_entropy_threshold:.3f}, gate_M={args.diffusion_gate_margin_threshold:.3f}, "
             f"teacher=Sharpen((1-lambda)q_sharp + lambda q_ctx), CE weight=commitment(alpha*ce_weight)"
         )
 
     previous_cache = None
     for epoch in range(total_epochs):
-        needs_cache = phase in {"phase2_diffusion", "phase3_dce", "phase3_joint_dce"} or bool(args.use_diffusion)
+        needs_cache = phase in {"phase2_diffusion", "phase3_dce", "phase3_joint_dce", "phase3_ic_dce"} or bool(args.use_diffusion)
         if needs_cache:
             # Cache mining always uses the current main model. In phase2 the model
             # is frozen; in phase3 it changes and the cache is refreshed each epoch.
@@ -545,6 +555,10 @@ def run_training(model, train_loader, val_loader, test_loader, conf, args, check
         elif phase == "phase3_joint_dce":
             model.train()
             diffusion_regularizer.train()
+        elif phase == "phase3_ic_dce":
+            model.train()
+            if diffusion_regularizer is not None:
+                diffusion_regularizer.eval()
         elif phase == "phase1_base":
             model.train()
             if diffusion_regularizer is not None:
@@ -573,6 +587,8 @@ def run_training(model, train_loader, val_loader, test_loader, conf, args, check
         epoch_agree_sum = 0.0
         epoch_sharper_sum = 0.0
         epoch_margin_better_sum = 0.0
+        epoch_entropy_gate_sum = 0.0
+        epoch_margin_gate_sum = 0.0
         epoch_use_diff_sum = 0.0
         epoch_eta_sum = 0.0
         epoch_mask_rate_sum = 0.0
@@ -664,6 +680,22 @@ def run_training(model, train_loader, val_loader, test_loader, conf, args, check
                     # used to directly supervise the main model here.
                     pll_component = pll_step_loss
                     total_step_loss = pll_component
+                    base_loss = (total_step_loss * seq_mask_float).sum() / seq_mask_float.sum().clamp(min=1.0)
+                    train_loss = base_loss
+
+                elif phase == "phase3_ic_dce":
+                    # Ablation: only InstanceCommitment. Use q_IC directly as the
+                    # soft CE target; do NOT apply sharpening, context correction,
+                    # or diffusion denoising. This isolates the contribution of
+                    # instance commitment from diffusion-generated targets.
+                    pll_component = pll_step_loss
+                    ce_component = (
+                        float(args.ic_dce_lambda)
+                        * commitment_gate_weight.detach()
+                        * target_pack["ce_step_loss"]
+                    )
+                    diff_commitment_component = torch.zeros_like(pll_step_loss)
+                    total_step_loss = pll_component + ce_component
                     base_loss = (total_step_loss * seq_mask_float).sum() / seq_mask_float.sum().clamp(min=1.0)
                     train_loss = base_loss
 
@@ -760,6 +792,8 @@ def run_training(model, train_loader, val_loader, test_loader, conf, args, check
                 epoch_agree_sum += float(diff_out["agree_rate"].detach().item())
                 epoch_sharper_sum += float(diff_out["sharper_rate"].detach().item())
                 epoch_margin_better_sum += float(diff_out["margin_better_rate"].detach().item())
+                epoch_entropy_gate_sum += float(diff_out.get("entropy_gate_rate", cand_scores.new_zeros(())).detach().item())
+                epoch_margin_gate_sum += float(diff_out.get("margin_gate_rate", cand_scores.new_zeros(())).detach().item())
                 epoch_use_diff_sum += float(diff_out["use_diff_rate"].detach().item())
                 epoch_eta_sum += float(diff_out["avg_eta"].detach().item())
                 epoch_mask_rate_sum += float(diff_out.get("mask_rate", cand_scores.new_zeros(())).detach().item())
@@ -807,6 +841,8 @@ def run_training(model, train_loader, val_loader, test_loader, conf, args, check
         avg_agree = epoch_agree_sum / max(epoch_diff_batches, 1)
         avg_sharper = epoch_sharper_sum / max(epoch_diff_batches, 1)
         avg_margin_better = epoch_margin_better_sum / max(epoch_diff_batches, 1)
+        avg_entropy_gate = epoch_entropy_gate_sum / max(epoch_diff_batches, 1)
+        avg_margin_gate = epoch_margin_gate_sum / max(epoch_diff_batches, 1)
         avg_use_diff = epoch_use_diff_sum / max(epoch_diff_batches, 1)
         avg_eta = epoch_eta_sum / max(epoch_diff_batches, 1)
         avg_mask_rate = epoch_mask_rate_sum / max(epoch_diff_batches, 1)
@@ -843,7 +879,8 @@ def run_training(model, train_loader, val_loader, test_loader, conf, args, check
             f"Diff={avg_diff:.4f} | DynDiffW={avg_dynamic_diff_weight:.6f} | WeightedDiff={avg_weighted_diff:.6f} | "
             f"Align={avg_align:.4f} | CtxLoss={avg_context:.4f} | Ent={avg_ent:.4f} | MarginLoss={avg_margin_loss:.4f} | "
             f"AvgGate={avg_weight:.4f} | Agree={avg_agree:.4f} | Sharper={avg_sharper:.4f} | "
-            f"MarginBetter={avg_margin_better:.4f} | UseDiff={avg_use_diff:.4f} | Eta/DCEW={avg_eta:.4f} | "
+            f"MarginBetter={avg_margin_better:.4f} | EntGate={avg_entropy_gate:.4f} | MarginGate={avg_margin_gate:.4f} | "
+            f"UseDiff={avg_use_diff:.4f} | Eta/DCEW={avg_eta:.4f} | "
             f"MaskRate={avg_mask_rate:.4f} | CtxLambda={avg_ctx_lambda:.4f} | CtxConf={avg_ctx_conf:.4f} | CtxAgree={avg_ctx_agree:.4f} | "
             f"PseudoCov={pseudo_coverage_ratio:.4f} | AvgAlpha={avg_alpha:.4f} | AvgCEWeight={avg_ce_weight:.4f} | "
             f"Val Acc@1={val_metrics['acc1']:.4f} | Val Acc@5={val_metrics['acc5']:.4f} | "
@@ -915,8 +952,8 @@ def main():
     parser.add_argument("--save_name", type=str, default=None)
     parser.add_argument("--radius_size", type=int, default=200)
 
-    parser.add_argument("--training_phase", type=str, default="phase1_base", choices=["phase1_base", "phase2_diffusion", "phase3_dce", "phase3_joint_dce"],
-                        help="phase1_base=PLL only; phase2_diffusion=freeze model and train diffusion; phase3_dce=freeze diffusion and train model with CE(q_diff,p); phase3_joint_dce=co-train model and diffusion.")
+    parser.add_argument("--training_phase", type=str, default="phase1_base", choices=["phase1_base", "phase3_ic_dce", "phase2_diffusion", "phase3_dce", "phase3_joint_dce"],
+                        help="phase1_base=PLL only; phase3_ic_dce=ablation with CE(q_IC,p); phase2_diffusion=freeze model and train diffusion; phase3_dce=freeze diffusion and train model with CE(q_diff,p); phase3_joint_dce=co-train model and diffusion.")
     parser.add_argument("--use_diffusion", type=str2bool, default=False)
     parser.add_argument("--pretrained_checkpoint", type=str, default=None)
     parser.add_argument("--diffusion_checkpoint", type=str, default=None,
@@ -933,6 +970,8 @@ def main():
     parser.add_argument("--commitment_stability_weight", type=float, default=0.00)
     parser.add_argument("--commitment_bias", type=float, default=0.00)
     parser.add_argument("--gate_threshold", type=float, default=0.35)
+    parser.add_argument("--ic_dce_lambda", type=float, default=1.00,
+                        help="Global multiplier for the InstanceCommitment-only ablation CE(q_IC,p). The sample weight is alpha*ce_weight.")
 
     # Diffusion sharpening. Removed the old raw-prediction restoration params:
     # tau_teacher, tau_student, KL/rec weights, reliability fallback, and separate
@@ -942,7 +981,13 @@ def main():
     parser.add_argument("--diffusion_lambda_max", type=float, default=1.00,
                         help="Global multiplier for phase2 diffusion fitting loss. Default 1.0 because phase2 trains only diffusion.")
     parser.add_argument("--diffusion_commitment_use_quality_gate", type=str2bool, default=True,
-                        help="If true, CE(q_diff) uses alpha*ce_weight only on q_diff that is sharper/no-worse than q_IC. It does not multiply by an extra quality score.")
+                        help="If true, CE(q_diff) uses alpha*ce_weight only on q_diff passing the selected quality gate.")
+    parser.add_argument("--diffusion_quality_gate_mode", type=str, default="relaxed", choices=["strict", "relaxed", "none"],
+                        help="Quality gate for q_diff. strict=no worse than q_IC; relaxed=entropy/margin thresholded; none=all eligible q_diff.")
+    parser.add_argument("--diffusion_gate_entropy_threshold", type=float, default=0.10,
+                        help="Relaxed gate threshold for normalized entropy: H_norm(q_diff)<=max(H_norm(q_IC), threshold).")
+    parser.add_argument("--diffusion_gate_margin_threshold", type=float, default=0.80,
+                        help="Relaxed gate threshold for margin: M(q_diff)>=min(M(q_IC), threshold).")
     parser.add_argument("--diffusion_hidden_dim", type=int, default=64)
     parser.add_argument("--diffusion_layers", type=int, default=1)
     parser.add_argument("--diffusion_heads", type=int, default=4)
@@ -1032,7 +1077,7 @@ def main():
         f"phase={args.training_phase}, diffusion={bool(args.use_diffusion)}, "
         f"diff_commit_dynamic_weight=sample-wise, "
         f"topk={args.commitment_topk}, stability={bool(args.commitment_use_stability)}, "
-        f"gate_threshold={args.gate_threshold:.2f}, batch_size={conf.batch_size}, "
+        f"gate_threshold={args.gate_threshold:.2f}, ic_dce_lambda={args.ic_dce_lambda:.2f}, batch_size={conf.batch_size}, "
         f"num_workers={conf.num_workers}, amp={conf.use_amp}, model_variant={args.model_variant}"
     )
 
