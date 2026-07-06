@@ -63,7 +63,7 @@ class TrainingConfig:
     batch_size = 16
     weight_decay = 1e-4
     seed = 42
-    patience = 5
+    patience = 3
     embed_dim = 64
     num_workers = 4
     pin_memory = False
@@ -525,7 +525,8 @@ def run_training(model, train_loader, val_loader, test_loader, conf, args, check
             f"mask_prob={args.diffusion_mask_prob:.2f}, ctx_loss_w={args.diffusion_context_loss_weight:.2f}, "
             f"DCE_lambda={args.diffusion_dce_lambda:.3f}, "
             f"quality_gate={args.diffusion_quality_gate_mode}, gate_H={args.diffusion_gate_entropy_threshold:.3f}, gate_M={args.diffusion_gate_margin_threshold:.3f}, "
-            f"teacher=Sharpen((1-lambda)q_sharp + lambda q_ctx), CE weight=commitment(alpha*ce_weight)"
+            f"teacher=Anneal(q_IC), denoiser=TrajectoryTransformer(Q_noisy[1:T]), "
+            f"masked_loss_w={args.diffusion_context_loss_weight:.2f}, CE weight=commitment(alpha*ce_weight)"
         )
 
     previous_cache = None
@@ -877,7 +878,7 @@ def run_training(model, train_loader, val_loader, test_loader, conf, args, check
             f"BaseLoss={avg_base_loss:.4f} | PLL={avg_pll:.4f} | DirectSoftCE={avg_ce:.4f} | "
             f"DiffCE={avg_diff_commitment:.6f} | DiffCEW={avg_diff_commitment_weight:.6f} | DiffCECov={avg_diff_commitment_coverage:.4f} | DiffCEQ={avg_diff_commitment_quality:.4f} | "
             f"Diff={avg_diff:.4f} | DynDiffW={avg_dynamic_diff_weight:.6f} | WeightedDiff={avg_weighted_diff:.6f} | "
-            f"Align={avg_align:.4f} | CtxLoss={avg_context:.4f} | Ent={avg_ent:.4f} | MarginLoss={avg_margin_loss:.4f} | "
+            f"Align={avg_align:.4f} | MaskLoss={avg_context:.4f} | Ent={avg_ent:.4f} | MarginLoss={avg_margin_loss:.4f} | "
             f"AvgGate={avg_weight:.4f} | Agree={avg_agree:.4f} | Sharper={avg_sharper:.4f} | "
             f"MarginBetter={avg_margin_better:.4f} | EntGate={avg_entropy_gate:.4f} | MarginGate={avg_margin_gate:.4f} | "
             f"UseDiff={avg_use_diff:.4f} | Eta/DCEW={avg_eta:.4f} | "
@@ -1003,7 +1004,7 @@ def main():
     parser.add_argument("--diffusion_refine_steps", type=int, default=3,
                         help="Number of iterative trajectory-belief refinement steps.")
     parser.add_argument("--diffusion_target_soft_mix", type=float, default=1.00,
-                        help="q_target=(1-mix)*p_base + mix*Sharpen((1-lambda)q_sharp+lambda*q_ctx). Main method uses 1.0.")
+                        help="q_target=(1-mix)*q_IC + mix*Anneal(q_IC). Main method uses 1.0.")
     parser.add_argument("--diffusion_teacher_temp_min", type=float, default=0.55,
                         help="Minimum temperature for the final teacher sharpening. Higher confidence uses this lower temperature.")
     parser.add_argument("--diffusion_teacher_temp_max", type=float, default=0.85,
@@ -1017,13 +1018,13 @@ def main():
     parser.add_argument("--diffusion_mask_condition", type=str2bool, default=True,
                         help="If true, mask the current-step condition vector when the distribution step is masked.")
     parser.add_argument("--diffusion_ctx_temperature", type=float, default=0.50,
-                        help="Temperature for context prior q_ctx over candidate POIs.")
+                        help="Backward-compatible unused arg in trajectory-level Transformer diffusion.")
     parser.add_argument("--diffusion_context_mix_max", type=float, default=0.20,
-                        help="Maximum PoE influence of trajectory context prior in q_teacher.")
+                        help="Backward-compatible unused arg in trajectory-level Transformer diffusion.")
     parser.add_argument("--diffusion_context_loss_weight", type=float, default=0.20,
-                        help="Explicit masked-step reconstruction loss weight for q_ctx -> q_sharp. Helps context prior learn semantics.")
+                        help="Weight for masked-step trajectory denoising loss. Larger values force stronger context recovery.")
     parser.add_argument("--diffusion_context_anchor_min_weight", type=float, default=0.10,
-                        help="Only q_IC with alpha*ce_weight above this value is used as context anchor; otherwise fallback to p_base.")
+                        help="Backward-compatible unused arg in trajectory-level Transformer diffusion.")
     parser.add_argument("--diffusion_dce_lambda", type=float, default=1.00,
                         help="Global multiplier for Stage-III CE(q_diff,p). Default 1.0: actual sample weight is the commitment weight alpha*ce_weight.")
     args = parser.parse_args()

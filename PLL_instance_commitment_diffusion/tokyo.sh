@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATASET=${DATASET:-gowalla_filtered}
-GPU=${GPU:-1}
-PREFIX=${PREFIX:-diffusion_generated_softce}
+DATASET=${DATASET:-tokyo}
+GPU=${GPU:-2}
+PREFIX=${PREFIX:-diffusion_soft_maskloss}
 RUN_MODE=${RUN_MODE:-full}   # full | ic | all
 BATCH_SIZE=${BATCH_SIZE:-16}
 NUM_WORKERS=${NUM_WORKERS:-4}
@@ -42,8 +42,8 @@ COMMON_DIFF_ARGS=(
   --diffusion_teacher_temp_min 0.55
   --diffusion_teacher_temp_max 0.85
   --diffusion_reverse_kl_weight 0.20
-  --diffusion_input_noise_min 0.05
-  --diffusion_input_noise_max 0.45
+  --diffusion_input_noise_min 0.02
+  --diffusion_input_noise_max 0.30
   --diffusion_ctx_temperature 0.50
   --diffusion_context_mix_max 0.20
   --diffusion_context_loss_weight 0.20
@@ -73,7 +73,7 @@ if [[ "${RUN_MODE}" == "ic" || "${RUN_MODE}" == "all" ]]; then
 fi
 
 if [[ "${RUN_MODE}" == "full" || "${RUN_MODE}" == "all" ]]; then
-  echo "[Stage 2] Train diffusion to generate q_diff from q_IC/q_sharp -> ${STAGE2}"
+  echo "[Stage 2] Train trajectory-Transformer diffusion denoiser from masked/noisy q_IC sequence -> ${STAGE2}"
   CUDA_VISIBLE_DEVICES=${GPU} python PLL_instance_commitment_diffusion/train.py \
     "${COMMON_TRAIN_ARGS[@]}" \
     --exp_name "${PREFIX}_stage2_diffusion" \
@@ -85,7 +85,7 @@ if [[ "${RUN_MODE}" == "full" || "${RUN_MODE}" == "all" ]]; then
     --diffusion_lambda_max 1.00 \
     --save_name "${STAGE2}"
 
-  echo "[Stage 3] Joint generated-softCE with relaxed gate -> ${STAGE3}"
+  echo "[Stage 3] Joint PLL + generated-softCE(q_diff) + diffusion loss -> ${STAGE3}"
   CUDA_VISIBLE_DEVICES=${GPU} python PLL_instance_commitment_diffusion/train.py \
     "${COMMON_TRAIN_ARGS[@]}" \
     --exp_name "${PREFIX}_stage3_joint_dce" \

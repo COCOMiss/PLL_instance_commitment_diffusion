@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATASET=${DATASET:-gowalla_filtered}
-GPU=${GPU:-1}
+DATASET=${DATASET:-tokyo}
+GPU=${GPU:-3}
 PREFIX=${PREFIX:-diffusion_generated_softce}
 RUN_MODE=${RUN_MODE:-full}   # full | ic | all
 BATCH_SIZE=${BATCH_SIZE:-16}
@@ -21,7 +21,7 @@ QUALITY_GATE_MODE=${QUALITY_GATE_MODE:-relaxed}   # relaxed | strict | none
 GATE_ENTROPY=${GATE_ENTROPY:-0.10}
 GATE_MARGIN=${GATE_MARGIN:-0.80}
 
-STAGE1=result/${DATASET}/instance_commitment_diffusion/context_poe_stage1_base/best_model.pth
+STAGE1=result/${DATASET}/instance_commitment_diffusion/${PREFIX}_ic_stage1_base/best_model.pth
 STAGE_IC="result/${DATASET}/instance_commitment_diffusion/${PREFIX}_ic_only/best_model.pth"
 STAGE2="result/${DATASET}/instance_commitment_diffusion/${PREFIX}_stage2_diffusion/best_model.pth"
 STAGE3="result/${DATASET}/instance_commitment_diffusion/${PREFIX}_stage3_joint_dce/best_model.pth"
@@ -59,6 +59,18 @@ COMMON_DIFF_ARGS=(
 )
 
 if [[ "${RUN_MODE}" == "ic" || "${RUN_MODE}" == "all" ]]; then
+  echo "[Stage 1] Train PLL base model -> ${STAGE1}"
+    CUDA_VISIBLE_DEVICES=${GPU} python PLL_instance_commitment_diffusion/train.py \
+      "${COMMON_TRAIN_ARGS[@]}" \
+      --exp_name "${PREFIX}_stage1_diffusion" \
+      --training_phase phase1_base \
+      --epochs "${DCE_EPOCHS}" \
+      --learning_rate "${LR_DCE}" \
+      "${COMMON_DIFF_ARGS[@]}" \
+      --patience 2 \
+      --save_name "${STAGE1}"
+
+
   echo "[Ablation] InstanceCommitment only: CE(q_IC, p), no sharpening, no diffusion -> ${STAGE_IC}"
   CUDA_VISIBLE_DEVICES=${GPU} python PLL_instance_commitment_diffusion/train.py \
     "${COMMON_TRAIN_ARGS[@]}" \
@@ -73,6 +85,18 @@ if [[ "${RUN_MODE}" == "ic" || "${RUN_MODE}" == "all" ]]; then
 fi
 
 if [[ "${RUN_MODE}" == "full" || "${RUN_MODE}" == "all" ]]; then
+
+  echo "[Stage 1] Train PLL base model -> ${STAGE1}"
+  CUDA_VISIBLE_DEVICES=${GPU} python PLL_instance_commitment_diffusion/train.py \
+    "${COMMON_TRAIN_ARGS[@]}" \
+    --exp_name "${PREFIX}_stage1_diffusion" \
+    --training_phase phase1_base \
+    --epochs "${DCE_EPOCHS}" \
+    --learning_rate "${LR_DCE}" \
+    "${COMMON_DIFF_ARGS[@]}" \
+    --save_name "${STAGE1}"
+
+
   echo "[Stage 2] Train diffusion to generate q_diff from q_IC/q_sharp -> ${STAGE2}"
   CUDA_VISIBLE_DEVICES=${GPU} python PLL_instance_commitment_diffusion/train.py \
     "${COMMON_TRAIN_ARGS[@]}" \
