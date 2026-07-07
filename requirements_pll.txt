@@ -1,0 +1,6 @@
+# 运行 PLL_instance_commitment_diffusion 所需的最小依赖
+# PyTorch 请根据新服务器 CUDA 版本手动安装
+numpy==1.26.4
+pandas==2.1.4
+scikit-learn==1.5.1
+matplotlib==3.10.6
