@@ -23,6 +23,81 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+
+
+class TemporalMLPDenoiser(nn.Module):
+
+    def __init__(
+        self,
+        hidden_dim,
+        num_layers=3,
+        dropout=0.1,
+    ):
+        super().__init__()
+
+        layers = []
+
+        for _ in range(num_layers):
+
+            layers.append(
+                nn.Linear(
+                    hidden_dim,
+                    hidden_dim
+                )
+            )
+
+            layers.append(
+                nn.LayerNorm(hidden_dim)
+            )
+
+            layers.append(
+                nn.GELU()
+            )
+
+            layers.append(
+                nn.Dropout(dropout)
+            )
+
+
+        self.mlp = nn.Sequential(*layers)
+
+
+
+    def forward(
+        self,
+        x,
+        src_key_padding_mask=None
+    ):
+        """
+        Keep the same interface as TransformerEncoder.
+
+        x:
+            [B,T,D]
+
+        src_key_padding_mask:
+            [B,T]
+            ignored for MLP
+        """
+
+        residual = x
+
+        x = self.mlp(x)
+
+        x = x + residual
+
+
+        # optional mask
+        if src_key_padding_mask is not None:
+
+            x = x.masked_fill(
+                src_key_padding_mask.unsqueeze(-1),
+                0.0
+            )
+
+
+        return x
+
+
 class InstanceConditionedDiffusionSharpening(nn.Module):
     """Trajectory-level Transformer belief denoiser.
 
@@ -123,16 +198,24 @@ class InstanceConditionedDiffusionSharpening(nn.Module):
             )
             self.condition_mask_token = nn.Parameter(torch.zeros(int(condition_dim)))
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.hidden_dim,
-            nhead=int(num_heads),
-            dim_feedforward=self.hidden_dim * 4,
-            dropout=float(dropout),
-            batch_first=True,
-            activation="gelu",
-        )
-        self.temporal_denoiser = nn.TransformerEncoder(encoder_layer, num_layers=int(num_layers))
+        # encoder_layer = nn.TransformerEncoderLayer(
+        #     d_model=self.hidden_dim,
+        #     nhead=int(num_heads),
+        #     dim_feedforward=self.hidden_dim * 4,
+        #     dropout=float(dropout),
+        #     batch_first=True,
+        #     activation="gelu",
+        # )
+        # self.temporal_denoiser = nn.TransformerEncoder(encoder_layer, num_layers=int(num_layers))
 
+        
+        
+        self.temporal_denoiser = TemporalMLPDenoiser(
+            hidden_dim=self.hidden_dim,
+            num_layers=max(int(num_layers), 2),
+            dropout=float(dropout),
+        )
+        
         # Residual update head used in every reverse refinement step.
         self.delta_head = nn.Sequential(
             nn.Linear(self.hidden_dim, self.hidden_dim),

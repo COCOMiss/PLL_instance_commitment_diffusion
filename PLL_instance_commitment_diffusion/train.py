@@ -942,7 +942,7 @@ def main():
     parser.add_argument("--exp_name", type=str, default=DEFAULT_EXP_NAME)
     parser.add_argument("--model_variant", type=str, default="base", choices=["base", "no_dist"])
     parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--learning_rate", type=float, default=5e-4)
+    parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--min_epochs_after_diffusion", type=int, default=5,
