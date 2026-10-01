@@ -198,23 +198,23 @@ class InstanceConditionedDiffusionSharpening(nn.Module):
             )
             self.condition_mask_token = nn.Parameter(torch.zeros(int(condition_dim)))
 
-        # encoder_layer = nn.TransformerEncoderLayer(
-        #     d_model=self.hidden_dim,
-        #     nhead=int(num_heads),
-        #     dim_feedforward=self.hidden_dim * 4,
-        #     dropout=float(dropout),
-        #     batch_first=True,
-        #     activation="gelu",
-        # )
-        # self.temporal_denoiser = nn.TransformerEncoder(encoder_layer, num_layers=int(num_layers))
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.hidden_dim,
+            nhead=int(num_heads),
+            dim_feedforward=self.hidden_dim * 4,
+            dropout=float(dropout),
+            batch_first=True,
+            activation="gelu",
+        )
+        self.temporal_denoiser = nn.TransformerEncoder(encoder_layer, num_layers=int(num_layers))
 
         
         
-        self.temporal_denoiser = TemporalMLPDenoiser(
-            hidden_dim=self.hidden_dim,
-            num_layers=max(int(num_layers), 2),
-            dropout=float(dropout),
-        )
+        # self.temporal_denoiser = TemporalMLPDenoiser(
+        #     hidden_dim=self.hidden_dim,
+        #     num_layers=max(int(num_layers), 2),
+        #     dropout=float(dropout),
+        # )
         
         # Residual update head used in every reverse refinement step.
         self.delta_head = nn.Sequential(
