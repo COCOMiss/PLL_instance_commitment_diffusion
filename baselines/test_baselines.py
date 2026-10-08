@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from .data import build_data, seq_collate_fn, pool_features
 from .model import POIAssignmentEncoder, ClassNormalizer
 from .algorithms import ConfidenceBank, PiCO, classification_loss, proden_loss_and_update
-from .train import training_inputs, evaluate
+from .train import training_inputs, evaluate, build_optimizer, load_optimizer_state
 
 
 def synthetic_data(folder):
@@ -49,6 +49,27 @@ def synthetic_data(folder):
 
 
 class BaselineTests(unittest.TestCase):
+    def test_low_memory_adamw_and_legacy_resume(self):
+        model = torch.nn.Linear(3, 2).double()
+        reference = copy.deepcopy(model)
+        args = SimpleNamespace(learning_rate=0.001, weight_decay=0.01)
+        optimizer = build_optimizer(model, args)
+        other = torch.optim.AdamW(reference.parameters(), lr=args.learning_rate,
+                                 weight_decay=args.weight_decay, foreach=True)
+        x = torch.tensor([[0.2, -0.4, 0.8]], dtype=torch.float64)
+        for step in range(3):
+            if step == 1:
+                legacy = copy.deepcopy(optimizer.state_dict())
+                legacy["param_groups"][0]["foreach"] = None
+                load_optimizer_state(optimizer, legacy)
+            self.assertIs(optimizer.param_groups[0]["foreach"], False)
+            for module, opt in ((model, optimizer), (reference, other)):
+                opt.zero_grad(set_to_none=True)
+                module(x).square().sum().backward()
+                opt.step()
+            for actual, expected in zip(model.parameters(), reference.parameters()):
+                torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-12)
+
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(1)

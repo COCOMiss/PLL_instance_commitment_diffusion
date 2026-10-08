@@ -121,6 +121,14 @@ python -m baselines.summarize
 
 断点继续训练要求使用同一个输出目录和数据/模型参数。`best.pt` 仅支持 eval；恢复训练使用 `last.pt`。推理成本仅测分类分支的 `predict`，排除 DataLoader 和 CPU→GPU 搬运，CUDA 计时前后同步；计时开始前的三次前向只用于设备预热，不是训练 warm-up。
 
+## CUDA 显存
+
+优化器显式使用 `AdamW(..., foreach=False)`，恢复旧 checkpoint 后也强制关闭 foreach。这样避免 CUDA 默认 foreach 对全部参数同时创建中间张量的额外峰值显存，代价是 optimizer step 可能变慢。特征、可训练参数和 PLL 目标不变。
+
+三层 Qwen POI embedding 仍然参与训练；其参数、梯度和 Adam 两份状态占用的显存不会随 batch size 减少。如果仍然 OOM，先尝试 `--batch_size 2` 或 `1`，以及 `--class_chunk_size 128`，降低激活及分类分块的峰值。它们不能保证解决参数/状态本身超出显存的问题。不要只为 baseline 冻结 embedding 或切换 sampled 后仍按原 full 协议汇报。
+
+如果手动修补服务器旧代码，在创建 AdamW 时加 `foreach=False`；在 `optimizer.load_state_dict(...)` 后再给每个 `param_group` 设置 `group["foreach"] = False`，避免旧 checkpoint 覆盖设置。
+
 ## 验证
 
 ```bash

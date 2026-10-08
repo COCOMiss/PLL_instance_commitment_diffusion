@@ -3,7 +3,8 @@
 These are executable checks, not benchmark results on Tokyo/NYC/Gowalla.
 
 - Environment: CPU, Python 3.12, PyTorch 2.14.1+cpu.
-- `python -m unittest baselines.test_baselines -v`: 5 tests passed.
+- `python -m unittest baselines.test_baselines -v`: 6 tests passed (re-run after the optimizer memory fix).
+- Single-tensor AdamW matched foreach AdamW updates over three CPU steps in float64; loading a legacy checkpoint with `foreach=None` preserved moment state and forced `foreach=False` before the next step.
 - Full-class block partition and gradients matched an independently constructed dense full-class scorer.
 - PRODEN and PiCO: CLI training for two epochs each in `full` and `sampled` modes on a synthetic CSV/Qwen fixture.
 - PRODEN and PiCO: optimizer/confidence/model state restored from `last.pt`, then an additional epoch executed.

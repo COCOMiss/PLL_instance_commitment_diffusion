@@ -72,6 +72,21 @@ def arguments():
     return args
 
 
+def build_optimizer(model, args):
+    # CUDA's default foreach path materializes intermediates across all parameters.
+    # Large trainable semantic embeddings make that extra peak memory prohibitive.
+    return torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
+                             lr=args.learning_rate, weight_decay=args.weight_decay,
+                             foreach=False)
+
+
+def load_optimizer_state(optimizer, state):
+    optimizer.load_state_dict(state)
+    # Older checkpoints restore foreach=None/True and override the constructor.
+    for group in optimizer.param_groups:
+        group["foreach"] = False
+
+
 def move(batch, device):
     return {key: value.to(device) if torch.is_tensor(value) else value for key, value in batch.items()}
 
@@ -191,8 +206,7 @@ def run(args):
         encoder, processor.num_pois, args.projection_dim, args.queue_size,
         args.encoder_momentum, args.prototype_momentum, args.contrastive_temperature)
     model = model.to(device)
-    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
-                                  lr=args.learning_rate, weight_decay=args.weight_decay)
+    optimizer = build_optimizer(model, args)
     bank = ConfidenceBank(datasets[0].num_steps, args.max_candidates)
     normalizer = ClassNormalizer(processor, datasets[0], args.normalizer, args.class_chunk_size)
     start, best, bad, best_epoch = 0, -1.0, 0, -1
@@ -206,7 +220,7 @@ def run(args):
         source_args = state["args"]
         smoke_only = smoke_only or bool(source_args.get("max_train_steps") or source_args.get("max_eval_batches")) or state.get("smoke_only", False)
         if not args.eval_only:
-            optimizer.load_state_dict(state["optimizer"])
+            load_optimizer_state(optimizer, state["optimizer"])
             bank.load_state_dict(state["confidence"])
             start, best, bad, best_epoch = state["epoch"] + 1, state["best"], state["bad"], state["best_epoch"]
             restore_rng(state["rng"])
